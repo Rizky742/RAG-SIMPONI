@@ -10,6 +10,7 @@ class ChatMessage(BaseModel):
 
 
 class ChatRequest(BaseModel):
+    user_id: str = Field(..., description="ID of the authenticated user")
     question: str = Field(..., min_length=1, max_length=2000, description="User's natural language question")
     history: list[ChatMessage] = Field(default=[], description="Previous conversation turns for multi-turn context")
     schema_name: str = Field(default="public", description="PostgreSQL schema to query against")

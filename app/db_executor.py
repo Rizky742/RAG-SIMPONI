@@ -22,11 +22,12 @@ class QueryExecutionError(Exception):
 async def execute_query(
     db: AsyncSession,
     sql: str,
-) -> tuple[list[dict[str, Any]], int]:
+) -> tuple[list[dict[str, Any]], int, bool]:
     """
     Execute a validated SQL query and return:
       - list of row dicts (column_name -> value)
-      - total row count
+      - number of rows returned to the caller
+      - truncated flag: True if more rows existed than were returned
 
     Raises QueryExecutionError on failure.
     """
@@ -38,6 +39,7 @@ async def execute_query(
         )
         return result
     except asyncio.TimeoutError:
+        await db.rollback()
         raise QueryExecutionError(
             f"Query timed out after {settings.sql_timeout_seconds} seconds. "
             "Try narrowing your query with more specific filters."
@@ -51,21 +53,29 @@ async def execute_query(
 async def _run_query(
     db: AsyncSession,
     sql: str,
-) -> tuple[list[dict[str, Any]], int]:
-    """Internal: run the query and map rows to dicts."""
-    result = await db.execute(text(sql))
-    rows = result.fetchmany(settings.max_rows_returned)
-    columns = list(result.keys())
+) -> tuple[list[dict[str, Any]], int, bool]:
+    """Internal: run the query and map rows to dicts.
 
+    Fetches one row beyond the cap so we can reliably tell whether the
+    result was truncated, instead of silently presenting a partial result
+    as if it were the full total.
+    """
+    cap = settings.max_rows_returned
+    result = await db.execute(text(sql))
+    # Fetch cap + 1 rows: the extra row tells us the result was truncated.
+    rows = result.fetchmany(cap + 1)
+
+    truncated = len(rows) > cap
+    if truncated:
+        rows = rows[:cap]
+
+    columns = list(result.keys())
     data = [
         {col: _serialize_value(row[i]) for i, col in enumerate(columns)}
         for row in rows
     ]
 
-    # Approximate total count (actual fetched rows)
-    total = len(data)
-
-    return data, total
+    return data, len(data), truncated
 
 
 def _serialize_value(value: Any) -> Any:

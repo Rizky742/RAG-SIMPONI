@@ -4,14 +4,18 @@ Extracts table/column metadata from PostgreSQL and builds
 a schema-aware prompt context for the LLM.
 """
 
-import json
+import time
 from typing import Optional
 from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncSession
 
 
-# In-memory schema cache (keyed by schema name)
+# In-memory schema cache (keyed by schema name), with a TTL so that schema
+# changes (migrations, new tables) are eventually picked up without a restart.
+# Use POST /schema/refresh for an immediate refresh.
 _schema_cache: dict[str, dict] = {}
+_schema_cache_ts: dict[str, float] = {}
+SCHEMA_CACHE_TTL_SECONDS = 600  # 10 minutes
 
 
 async def extract_schema_metadata(
@@ -23,7 +27,9 @@ async def extract_schema_metadata(
     Extract full schema metadata from PostgreSQL information_schema.
     Returns a dict: { table_name: { columns: [...], foreign_keys: [...], comment: str } }
     """
-    if schema_name in _schema_cache and not refresh:
+    cached_at = _schema_cache_ts.get(schema_name, 0.0)
+    is_fresh = (time.monotonic() - cached_at) < SCHEMA_CACHE_TTL_SECONDS
+    if schema_name in _schema_cache and is_fresh and not refresh:
         return _schema_cache[schema_name]
 
     # ── 1. Tables & columns ─────────────────────────────────────────────
@@ -129,6 +135,7 @@ async def extract_schema_metadata(
         })
 
     _schema_cache[schema_name] = schema_meta
+    _schema_cache_ts[schema_name] = time.monotonic()
     return schema_meta
 
 
@@ -137,6 +144,11 @@ def build_schema_prompt(schema_meta: dict, source_filter: Optional[str] = None) 
     Convert schema metadata into a compact, LLM-friendly text representation.
     Optional source_filter limits output to tables whose name contains the keyword.
     """
+    # Ignore empty/whitespace and the Swagger UI placeholder "string" so a
+    # stray default value doesn't silently filter every table away.
+    if source_filter and source_filter.strip().lower() in ("", "string"):
+        source_filter = None
+
     lines = ["### DATABASE SCHEMA\n"]
 
     # List all available tables upfront
@@ -171,3 +183,4 @@ def get_cached_schema(schema_name: str = "public") -> Optional[dict]:
 
 def clear_schema_cache():
     _schema_cache.clear()
+    _schema_cache_ts.clear()
