@@ -15,7 +15,6 @@ venv/
 Dockerfile
 docker-compose*.yml
 *.md
-*.txt
 .idea
 .vscode
 *.swp
